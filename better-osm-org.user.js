@@ -16,6 +16,7 @@
 // @description     Several improvements for advanced users of openstreetmap.org
 // @description:ru  Скрипт, добавляющий на openstreetmap.org полезные картографам функции
 // @author       deevroman
+// @match        http://localhost:3000/*
 // @match        https://www.openstreetmap.org/*
 // @exclude      https://www.openstreetmap.org/api*
 // @exclude      https://www.openstreetmap.org/diary/new
@@ -65,6 +66,8 @@
 // @connect      raw.githubusercontent.com
 // @connect      en.wikipedia.org
 // @connect      amazonaws.com
+// @connect      server.arcgisonline.com
+// @connect      clarity.maptiles.arcgis.com
 // @sandbox      JavaScript
 // @resource     OAUTH_HTML https://github.com/deevroman/better-osm-org/raw/master/finish-oauth.html
 // @resource     OSMCHA_ICON https://github.com/deevroman/better-osm-org/raw/master/icons/osmcha.ico
@@ -211,7 +214,7 @@ GM_config.init(
                     },
                 'SatelliteLayers':
                     {
-                        'label': 'Add satellite layers for notes page (Firefox only)',
+                        'label': 'Add satellite layers for notes page',
                         'type': 'checkbox',
                         'default': 'checked',
                         'labelPos': 'right'
@@ -1554,15 +1557,57 @@ function parseESRITileURL(url) {
     }
 }
 
+const fetchBlobWithCache = (() => {
+    const cache = new Map();
+
+    return async url => {
+        if (cache.has(url)) {
+            return cache.get(url);
+        }
+
+        const promise = GM.xmlHttpRequest({
+            url: url,
+            responseType: "blob"
+        })
+        cache.set(url, promise);
+
+        try {
+            const result = await promise;
+            cache.set(url, result);
+            return result;
+        } catch (error) {
+            cache.delete(url);
+            throw error;
+        }
+    };
+})();
+
+async function bypassChromeCSPForImagesSrc(imgElem, url) {
+    const blob = (await fetchBlobWithCache(url)).response;
+
+    const satTile = await new Promise(resolve => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(blob);
+    });
+    if (currentTilesMode === SAT_MODE) {
+        imgElem.src = satTile;
+    }
+}
+
 function switchESRIbeta() {
     const NewSatellitePrefix = SatellitePrefix === ESRIPrefix ? ESRIBetaPrefix : ESRIPrefix;
     document.querySelectorAll(".leaflet-tile").forEach(i => {
         if (i.nodeName !== 'IMG') {
             return;
         }
-        let xyz = parseESRITileURL(i.src)
+        let xyz = parseESRITileURL(isFirefox ? i.src : i.getAttribute("real-url") ?? "")
         if (!xyz) return
-        i.src = NewSatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x;
+        if (isFirefox) {
+            i.src = NewSatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false";
+        } else {
+            bypassChromeCSPForImagesSrc(i, NewSatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false");
+        }
     })
     SatellitePrefix = NewSatellitePrefix
     if (SatellitePrefix === ESRIBetaPrefix) {
@@ -1571,6 +1616,8 @@ function switchESRIbeta() {
         getMap()?.attributionControl?.setPrefix("ESRI")
     }
 }
+
+const isFirefox = navigator.userAgent.includes("Firefox");
 
 function switchTiles() {
     if (tilesObserver) {
@@ -1593,24 +1640,24 @@ function switchTiles() {
         if (currentTilesMode === SAT_MODE) {
             let xyz = parseOSMTileURL(i.src)
             if (!xyz) return
-            i.src = SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x;
-            if (i.complete) {
+            unsafeWindow.L.DomEvent.off(i, "error")
+            if (isFirefox) {
+                i.src = SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false";
+            } else {
+                i.setAttribute("real-url", SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false");
+            }
+            if (!isFirefox) {
+                bypassChromeCSPForImagesSrc(i, SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false");
+            }
+            if (i.complete && isFirefox) {
                 i.classList.add("no-invert");
             } else {
                 i.addEventListener("load", e => {
                     e.target.classList.add("no-invert");
                 }, {once: true})
             }
-            /*
-            const newImg = GM_addElement(document.body, "img", {
-                src: SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x
-            })
-            newImg.classList = i.classList
-            newImg.style.cssText = i.style.cssText;
-            i.replaceWith(newImg)
-            */
         } else {
-            let xyz = parseESRITileURL(i.src)
+            let xyz = parseESRITileURL(isFirefox ? i.src : i.getAttribute("real-url") ?? "")
             if (!xyz) return
             i.src = OSMPrefix + xyz.z + "/" + xyz.x + "/" + xyz.y + ".png";
             if (i.complete) {
@@ -1631,7 +1678,16 @@ function switchTiles() {
                 if (currentTilesMode === SAT_MODE) {
                     let xyz = parseOSMTileURL(node.src);
                     if (!xyz) return
-                    node.src = SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x;
+                    unsafeWindow.L.DomEvent.off(node, "error")
+                    if (isFirefox) {
+                        node.src = SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false";
+                    } else {
+                        node.src = "";
+                    }
+                    node.setAttribute("real-url", SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false");
+                    if (!isFirefox) {
+                        bypassChromeCSPForImagesSrc(node, SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x + "?blankTile=false")
+                    }
                     if (node.complete) {
                         node.classList.add("no-invert");
                     } else {
@@ -1639,16 +1695,8 @@ function switchTiles() {
                             e.target.classList.add("no-invert");
                         }, {once: true})
                     }
-                    /*
-                    const newImg = GM_addElement(document.body, "img", {
-                        src: SatellitePrefix + xyz.z + "/" + xyz.y + "/" + xyz.x
-                    })
-                    newImg.classList = node.classList
-                    newImg.style.cssText = node.style.cssText;
-                    node.replaceWith(newImg)
-                    */
                 } else {
-                    let xyz = parseESRITileURL(node.src)
+                    let xyz = parseESRITileURL(isFirefox ? node.src : node.getAttribute("real-url"))
                     if (!xyz) return
                     node.src = OSMPrefix + xyz.z + "/" + xyz.x + "/" + xyz.y + ".png";
                     if (node.complete) {
@@ -1707,7 +1755,7 @@ function addSatelliteLayers() {
     }
     btnOnNotePage.style.cursor = "pointer";
     btnOnNotePage.classList.add("turn-on-satellite");
-    btnOnNotePage.title = "Switch between map and satellite images. Only for Firefox"
+    btnOnNotePage.title = "Switch between map and satellite images"
     // todo disable for Chrome
     document.querySelectorAll("h4")[0].appendChild(document.createTextNode("\xA0"));
     document.querySelectorAll("h4")[0].appendChild(btnOnNotePage);
@@ -1720,7 +1768,6 @@ function addSatelliteLayers() {
 }
 
 function setupSatelliteLayers() {
-    if (!navigator.userAgent.includes("Firefox")) return
     let timerId = setInterval(addSatelliteLayers, 100);
     setTimeout(() => {
         clearInterval(timerId);
@@ -4695,11 +4742,11 @@ function arraySplit(arr, N = 2) {
 /**
  * @type ChangesetMetadata|null
  **/
-let prevChangesetMetadata = null
+let prevChangesetMetadata = null;
 /**
  * @type ChangesetMetadata|null
  **/
-let changesetMetadata = null
+let changesetMetadata = null;
 let startTouch = null;
 let touchMove = null;
 let touchEnd = null;
@@ -4815,6 +4862,9 @@ function addRegionForFirstChangeset(attempts = 5) {
                 console.timeEnd("Geocoding changeset")
             }
         })
+    }).catch(e => {
+        console.debug("Nominatim fail")
+        console.debug(e)
     })
 
 }
@@ -5845,6 +5895,8 @@ async function processObjectInteractions(changesetID, objType, i, prevVersion, t
         i.id = "w" + objID
 
         const res = await fetch(osm_server.apiBase + objType + "/" + objID + "/full.json", {signal: abortDownloadingController.signal});
+        // todo по-хорошему нужно проверять, а не успела ли измениться история линии
+        // будет более актуально после добавление предзагрузки
         const nowDeleted = !res.ok;
         const dashArray = nowDeleted ? "4, 4" : null;
         let lineWidth = nowDeleted ? 4 : 3
@@ -5859,7 +5911,7 @@ async function processObjectInteractions(changesetID, objType, i, prevVersion, t
             })
             if (changesetMetadata === null) {
                 console.log(`changesetMetadata not ready. Wait second...`)
-                await new Promise(r => setTimeout(r, 1000)); // todo нужно поретраить
+                await abortableSleep(1000, abortDownloadingController) // todo нужно поретраить
             }
         }
 
@@ -5910,7 +5962,7 @@ async function processObjectInteractions(changesetID, objType, i, prevVersion, t
         }
         if (changesetMetadata === null) {
             console.log(`changesetMetadata not ready. Wait second...`)
-            await new Promise(r => setTimeout(r, 1000)); // todo нужно поретраить
+            await abortableSleep(1000, abortDownloadingController) // todo нужно поретраить
         }
         if (targetVersion.visible === false) {
             const versionForLoad = targetVersion.visible === false ? prevVersion.version : targetVersion.version;
@@ -6089,7 +6141,7 @@ async function processObjectsInteractions(objType, uniqTypes, changesetID) {
     if (!changesetsCache[changesetID]) {
         await getChangeset(changesetID)
     } else if (objCount >= 20 && uniqTypes !== 1) {
-        await new Promise(r => setTimeout(r, 500));
+        await abortableSleep(500, abortDownloadingController);
     }
 
 }
@@ -6377,6 +6429,31 @@ function removeEditTagsButton() {
             document.querySelector(".edit_tags_class")?.remove()
         }
     }
+}
+
+async function preloadChangeset(changesetID) {
+    console.log(`c${changesetID} preloading`)
+    const changesetData = await getChangeset(changesetID)
+    const ways = changesetData.querySelectorAll("way")
+    Array.from(ways).slice(0, 5).forEach(way => {
+        getWayHistory(way.id)
+    })
+    console.log(`c${changesetID} preloaded`)
+}
+
+function preloadPrevNextChangesets() {
+    console.debug("Preloading changesets")
+    const prevLink = getPrevChangesetLink()
+    if (prevLink) {
+        const changesetID = prevLink.href.match(/\/changeset\/(\d+)/)[1]
+        setTimeout(preloadChangeset, 0, changesetID)
+    }
+    const nextLink = getNextChangesetLink()
+    if (nextLink) {
+        const changesetID = nextLink.href.match(/\/changeset\/(\d+)/)[1]
+        setTimeout(preloadChangeset, 0, changesetID)
+    }
+    needPreloadChangesets = false
 }
 
 async function addChangesetQuickLook() {
@@ -6934,6 +7011,9 @@ async function addChangesetQuickLook() {
         console.timeEnd("QuickLook")
         console.log("%cSetup QuickLook finished", 'background: #222; color: #bada55')
         // todo mark changeset as reviewed
+        if (needPreloadChangesets) {
+            preloadPrevNextChangesets(changesetID);
+        }
     }
 }
 
@@ -7932,6 +8012,10 @@ function setupMassChangesetsActions() {
 let hotkeysConfigured = false
 
 
+async function getChangesetMetadata(changeset_id) {
+    return await fetch(osm_server.apiBase + "changeset" + "/" + changeset_id + ".json");
+}
+
 /**
  * @param {number|null=} changeset_id
  * @return {Promise<void>}
@@ -7948,9 +8032,7 @@ async function loadChangesetMetadata(changeset_id = null) {
         return;
     }
     prevChangesetMetadata = changesetMetadata
-    const res = await fetch(osm_server.apiBase + "changeset" + "/" + changeset_id + ".json",
-        // {signal: abortDownloadingController.signal}
-    );
+    const res = await getChangesetMetadata(changeset_id);
     if (res.status === 509) {
         await error509Handler(res)
     } else {
@@ -8072,6 +8154,27 @@ function updateCurrentObjectMetadata() {
     setTimeout(loadRelationMetadata, 0)
 }
 
+async function abortableSleep(ms, {signal}) {
+    await new Promise((resolve, reject) => {
+        signal?.throwIfAborted();
+
+        function done() {
+            resolve();
+            signal?.removeEventListener("abort", stop);
+        }
+
+        function stop() {
+            console.debug("sleep aborted")
+            reject(this.reason);
+            clearTimeout(timer);
+        }
+
+        const timer = setTimeout(done, ms);
+        signal?.addEventListener("abort", stop);
+    });
+}
+
+
 async function sleep(ms) {
     await new Promise(r => setTimeout(r, ms))
 }
@@ -8140,11 +8243,17 @@ function resetMapHover() {
     })
 }
 
+let overzoomObserver = null
+
 function enableOverzoom() {
     if (!GM_config.get("OverzoomForDataLayer")) {
         return
     }
     console.log("Enabling overzoom for map layer")
+    if (overzoomObserver){
+        overzoomObserver.disconnect()
+    }
+
     injectJSIntoPage(`
     (function () {
         map.options.maxZoom = 22
@@ -8153,6 +8262,20 @@ function enableOverzoom() {
         layers[0].options.maxZoom = 22
     })()
     `)
+
+    const observer = new MutationObserver(mutations => {
+        mutations.forEach(mutation => {
+            mutation.addedNodes.forEach(node => {
+                if (node.nodeName !== 'IMG') {
+                    return;
+                }
+                unsafeWindow.L.DomEvent.off(node, "error")
+            });
+        });
+    });
+    overzoomObserver = observer;
+    observer.observe(document.body, {childList: true, subtree: true});
+
     // it's unstable
     console.log("Overzoom enabled")
 }
@@ -8162,6 +8285,22 @@ const ABORT_ERROR_NEXT = "Abort requests for moving to next changeset";
 const ABORT_ERROR_USER_CHANGESETS = "Abort requests for moving to user changesets";
 
 let layersHidden = false;
+
+let needPreloadChangesets = false;
+
+function getPrevChangesetLink() {
+    const navigationLinks = document.querySelectorAll("div.secondary-actions")[1]?.querySelectorAll("a")
+    if (navigationLinks && navigationLinks[0].href.includes("/changeset/")) {
+        return navigationLinks[0]
+    }
+}
+
+function getNextChangesetLink() {
+    const navigationLinks = document.querySelectorAll("div.secondary-actions")[1]?.querySelectorAll("a")
+    if (navigationLinks && Array.from(navigationLinks).at(-1).href.includes("/changeset/")) {
+        return Array.from(navigationLinks).at(-1);
+    }
+}
 
 function setupNavigationViaHotkeys() {
     if (["/edit", "/id"].includes(location.pathname)) return
@@ -8500,18 +8639,20 @@ function setupNavigationViaHotkeys() {
         }
         if (location.pathname.includes("/changeset") && !location.pathname.includes("/changeset_comments")) {
             if (e.code === "Comma") {
-                const navigationLinks = document.querySelectorAll("div.secondary-actions")[1]?.querySelectorAll("a")
-                if (navigationLinks && navigationLinks[0].href.includes("/changeset/")) {
+                const link = getPrevChangesetLink()
+                if (link) {
                     abortDownloadingController.abort(ABORT_ERROR_PREV)
-                    navigationLinks[0].focus()
-                    navigationLinks[0].click()
+                    needPreloadChangesets = true
+                    link.focus()
+                    link.click()
                 }
             } else if (e.code === "Period") {
-                const navigationLinks = document.querySelectorAll("div.secondary-actions")[1]?.querySelectorAll("a")
-                if (navigationLinks && Array.from(navigationLinks).at(-1).href.includes("/changeset/")) {
+                const link = getNextChangesetLink()
+                if (link) {
                     abortDownloadingController.abort(ABORT_ERROR_NEXT)
-                    Array.from(navigationLinks).at(-1).focus()
-                    Array.from(navigationLinks).at(-1).click()
+                    needPreloadChangesets = true
+                    link.focus()
+                    link.click()
                 }
             } else if (e.code === "KeyH") {
                 const userChangesetsLink = document.querySelectorAll("div.secondary-actions")[1]?.querySelector('a[href^="/user/"]')
@@ -9260,7 +9401,6 @@ if ([prod_server.origin, dev_server.origin, local_server.origin].includes(locati
                 }), unsafeWindow)
             )
         }
-
         unsafeWindow.mapHook = exportFunction(mapHook, unsafeWindow)
         unsafeWindow.mapHook()
         if (unsafeWindow.map instanceof HTMLElement) {
